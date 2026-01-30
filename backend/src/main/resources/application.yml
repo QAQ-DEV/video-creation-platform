@@ -10,16 +10,8 @@ spring:
     url: jdbc:mysql://localhost:3306/video_generation_platform?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
 
     username: root
+    # [TODO] 队友请修改: 你的本地数据库密码
     password: 123456
-
-  # 添加连接池配置（重要！）
-  jpa:
-    hibernate:
-      ddl-auto: update  # 或设为 none
-    show-sql: true  # 开发时显示SQL
-    properties:
-      hibernate:
-        format_sql: true
 
   # Redis Configuration
   data:
@@ -34,8 +26,8 @@ spring:
   # File Upload Configuration (Custom)
   servlet:
     multipart:
-      max-file-size: 100MB
-      max-request-size: 100MB
+      max-file-size: 500MB
+      max-request-size: 500MB
 
 # MyBatis Plus Configuration
 mybatis-plus:
@@ -71,7 +63,7 @@ knife4j:
 # Custom File Path Config
 file:
   # [TODO] 队友请修改: [重要] 必须改为你电脑上的本地绝对路径！用于存储上传的文件
-  upload-path: E:\shixunzuoye\自动化短视频创作平台\storage
+  upload-path: G:/ShiXi/xiangmu/upload
 
 sms:
   aliyun:
