@@ -38,18 +38,24 @@ public class CreationServiceImpl implements CreationService {
     private final AiTaskMapper aiTaskMapper;
     private final WalletService walletService;
     private final Executor creationTaskExecutor;
+    private final com.huike.video.common.service.ResourceService resourceService;
+    private final org.springframework.context.ApplicationEventPublisher eventPublisher;
 
     public CreationServiceImpl(
             AiModelService aiModelService,
             StrategyManager strategyManager,
             AiTaskMapper aiTaskMapper,
             WalletService walletService,
-            @Qualifier("creationTaskExecutor") Executor creationTaskExecutor) {
+            @Qualifier("creationTaskExecutor") Executor creationTaskExecutor,
+            com.huike.video.common.service.ResourceService resourceService,
+            org.springframework.context.ApplicationEventPublisher eventPublisher) {
         this.aiModelService = aiModelService;
         this.strategyManager = strategyManager;
         this.aiTaskMapper = aiTaskMapper;
         this.walletService = walletService;
         this.creationTaskExecutor = creationTaskExecutor;
+        this.resourceService = resourceService;
+        this.eventPublisher = eventPublisher;
     }
 
     // 任务状态常量
@@ -73,18 +79,18 @@ public class CreationServiceImpl implements CreationService {
         }
 
         // 2. 计算费用并校验余额
-        // 注意：这里使用 user prompt 来估算
+        // 这里使用 user prompt 来估算
         BigDecimal cost = calculateCost(model, request.getPrompt());
         BigDecimal currentBalance = walletService.getBalanceByUserId(userId);
         if (currentBalance.compareTo(cost) < 0) {
             throw new BusinessException(30001, "余额不足，当前余额: " + currentBalance + ", 需要: " + cost);
         }
 
-        // 3. 预扣费
-        boolean deducted = walletService.deductBalance(userId, cost);
+        // 3. 预扣费 (taskId 在此时为 null，将在 catch 块中补充记录)
+        String taskId = IdUtil.simpleUUID();
+        boolean deducted = walletService.deductBalance(userId, cost, taskId, "AI生成任务预扣费");
 
         // 4. 创建任务记录
-        String taskId = IdUtil.simpleUUID();
         AiTask task = new AiTask();
         task.setId(taskId);
         task.setUserId(userId);
@@ -120,33 +126,53 @@ public class CreationServiceImpl implements CreationService {
         aiTaskMapper.insert(task);
 
         // 5. 调用策略执行
-        try {
-            CreationResponse response = strategyManager.executeGeneration(request);
+        // 5. 异步调用策略执行
+        creationTaskExecutor.execute(() -> {
+            try {
+                CreationResponse response = strategyManager.executeGeneration(request);
 
-            // 6. 更新任务状态
-            if (response.getTaskId() != null) {
-                // 第三方异步任务 ID
-                task.setExternalTaskId(response.getTaskId());
-                task.setStatus(STATUS_PROCESSING);
-            } else if (response.getMediaUrl() != null) {
-                // 同步返回了结果 (极少见，除非是快速模型)
-                task.setResultFilePath(response.getMediaUrl());
-                task.setStatus(STATUS_SUCCESS);
+                // 6. 更新任务状态
+                if (response.getTaskId() != null) {
+                    // 第三方异步任务 ID
+                    task.setExternalTaskId(response.getTaskId());
+                    task.setStatus(STATUS_PROCESSING);
+                } else {
+                    // 同步返回了结果 (如文生文)
+                    task.setStatus(STATUS_SUCCESS);
+                    task.setEndTime(LocalDateTime.now());
+                    
+                    if (response.getMediaUrl() != null) {
+                        task.setResultFilePath(response.getMediaUrl());
+                    }
+                    if (response.getContent() != null) {
+                         // 将文本结果存入 outputConfig
+                         Map<String, Object> output = task.getOutputConfig();
+                         if (output == null) output = new HashMap<>();
+                         output.put("content", response.getContent());
+                         task.setOutputConfig(output);
+                    }
+                    // token usage check
+                    if (response.getUsageTokens() != null) {
+                        task.setCostToken(BigDecimal.valueOf(response.getUsageTokens()));
+                    }
+                }
+                
+                aiTaskMapper.updateById(task);
 
+            } catch (Exception e) {
+                log.error("Async Task execution failed for task {}", taskId, e);
+                task.setStatus(STATUS_FAILED);
+                task.setErrorMessage(e.getMessage());
                 task.setEndTime(LocalDateTime.now());
+                aiTaskMapper.updateById(task);
+                // 退款
+                try {
+                    walletService.refundBalance(userId, cost, taskId, "任务执行失败退款");
+                } catch (Exception ex) {
+                    log.error("Refund failed for task {}", taskId, ex);
+                }
             }
-            
-            aiTaskMapper.updateById(task);
-
-        } catch (Exception e) {
-            log.error("Task execution failed", e);
-            task.setStatus(STATUS_FAILED);
-            task.setErrorMessage(e.getMessage());
-            aiTaskMapper.updateById(task);
-            // 退款
-            walletService.refundBalance(userId, cost);
-            throw new BusinessException(500, "任务执行失败: " + e.getMessage());
-        }
+        });
 
         return taskId;
     }
@@ -176,7 +202,7 @@ public class CreationServiceImpl implements CreationService {
 
         // 4. 按实际消耗扣费
         BigDecimal actualCost = calculateActualCost(model, response.getUsageTokens());
-        walletService.deductBalance(userId, actualCost);
+        walletService.deductBalance(userId, actualCost, null, "AI文本生成消费");
 
         // 5. 异步记录到 AiTask 表 (Log for Audit)
         // 虽然是同步请求，但也最好留底，特别是为了流水查询
@@ -201,7 +227,9 @@ public class CreationServiceImpl implements CreationService {
                     String remoteStatus = syncResponse.getStatus();
                     
                     if ("SUCCESS".equals(remoteStatus)) {
-                         // 厂商已完成 -> 异步下载并更新 DB
+                         // Double Check: Prevent multiple async downloads
+                         // Ideally we should have a locking mechanism or intermediate state.
+                         // For now, reliance on the Async Executor's internal check (implemented in handleDownloadAndComplete)
                          handleDownloadAndComplete(task, syncResponse);
                     } else if ("FAILED".equals(remoteStatus)) {
                         task.setStatus(STATUS_FAILED);
@@ -223,55 +251,52 @@ public class CreationServiceImpl implements CreationService {
     /**
      * 异步处理下载和完成
      */
+    /**
+     * 异步处理下载和完成
+     */
     private void handleDownloadAndComplete(AiTask task, CreationResponse response) {
         creationTaskExecutor.execute(() -> {
+            // DOUBLE CHECK: Reload task to make sure it wasn't already completed by another thread
+            AiTask currentTask = aiTaskMapper.selectById(task.getId());
+            if (currentTask.getStatus() == STATUS_SUCCESS) {
+                log.info("Task {} already completed, skipping duplicate download.", task.getId());
+                return;
+            }
+
             try {
                 String mediaUrl = response.getMediaUrl();
                 String coverUrl = response.getCoverUrl();
                 
-                // determine subDir and default extension based on task type
-                String subDir = "generations";
-                String defaultExt = ".mp4";
-                
+                String module = "generations";
                 Integer taskType = task.getTaskType();
                 if (taskType != null) {
-                    if (taskType == 2) { // Image
-                        subDir = "images";
-                        defaultExt = ".png";
-                    } else if (taskType == 3 || taskType == 4) { // Video
-                        subDir = "videos";
-                        defaultExt = ".mp4";
-                    }
+                    if (taskType == 2) module = "images";
+                    else if (taskType == 3 || taskType == 4) module = "videos";
                 }
                 
-                // 1. 下载文件 (视频或图片)
+                // 1. 下载主体文件
                 if (mediaUrl != null && mediaUrl.startsWith("http")) {
-                    String extension = extractExtension(mediaUrl, defaultExt);
-                    
-                    String fileName = task.getId() + extension;
-                    String localPath = FileStorageUtils.downloadFile(mediaUrl, fileName, subDir);
-                    task.setResultFilePath(localPath);
-                    
-                    // 尝试获取文件大小 (FileStorageUtils downloadFile 暂未返回大小，这里简略)
+                   String relativePath = resourceService.download(mediaUrl, module, task.getId() + extractExtension(mediaUrl, ".mp4"));
+                   task.setResultFilePath(relativePath);
                 }
                 
                 // 2. 下载封面
                 if (coverUrl != null && coverUrl.startsWith("http")) {
-                    String extension = extractExtension(coverUrl, ".jpg");
-                    String fileName = task.getId() + "_cover" + extension;
-                    String localCoverPath = FileStorageUtils.downloadFile(coverUrl, fileName, "covers");
-                    task.setResultCoverPath(localCoverPath);
+                    String relativePath = resourceService.download(coverUrl, "covers", task.getId() + "_cover" + extractExtension(coverUrl, ".jpg"));
+                    task.setResultCoverPath(relativePath);
                 } else {
                     task.setResultCoverPath(coverUrl);
                 }
 
                 // 3. 更新为成功
                 task.setStatus(STATUS_SUCCESS);
-                // task.setProgress(100); // 字段已移除
                 task.setEndTime(LocalDateTime.now());
                 
                 aiTaskMapper.updateById(task);
-                log.info("Task {} completed and downloaded to {}/{}", task.getId(), subDir, task.getResultFilePath());
+                log.info("Task {} completed. Resource: {}", task.getId(), task.getResultFilePath());
+                
+                // 发布任务完成事件 (同步到素材库等)
+                eventPublisher.publishEvent(new com.huike.video.modules.creation.event.AiTaskCompletedEvent(this, task));
                 
             } catch (Exception e) {
                 log.error("Failed to download result for task {}", task.getId(), e);

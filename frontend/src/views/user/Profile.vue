@@ -12,7 +12,7 @@
       <div class="avatar-preview">
         <!-- 实时预览选中的图片 -->
         <img 
-          :src="avatarPreviewUrl || (profile.avatarUrl || defaultAvatar)" 
+          :src="avatarPreviewUrl || getAvatarUrl" 
           alt="头像预览" 
           class="avatar-big"
         />
@@ -56,7 +56,7 @@
           title="点击查看/更换头像"
         >
           <el-avatar :size="100" class="user-avatar">
-            <img :src="profile.avatarUrl || defaultAvatar" alt="用户头像" />
+            <img :src="getAvatarUrl" alt="用户头像" />
           </el-avatar>
           <span class="avatar-tip">点击更换头像</span>
         </div>
@@ -365,16 +365,7 @@ const getCreatorApplyTip = computed(() => {
 
 // 头像URL处理
 const getAvatarUrl = computed(() => {
-  if (!profile.value.avatarUrl) return defaultAvatar
-  
-  // 处理相对路径的avatarUrl
-  if (profile.value.avatarUrl.startsWith('/')) {
-    // 在生产环境中应该使用环境变量配置的基础URL
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || window.location.origin
-    return `${baseUrl}${profile.value.avatarUrl}`
-  }
-  
-  return profile.value.avatarUrl
+  return profile.value?.avatarUrl || defaultAvatar
 })
 
 // 监听编辑状态变化
