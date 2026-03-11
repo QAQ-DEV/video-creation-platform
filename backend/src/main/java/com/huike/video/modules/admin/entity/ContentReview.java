@@ -1,5 +1,6 @@
 package com.huike.video.modules.admin.entity;
 
+import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableLogic;
 import com.baomidou.mybatisplus.annotation.TableName;
@@ -17,7 +18,7 @@ import java.time.LocalDateTime;
 @TableName("content_reviews")
 public class ContentReview extends BaseEntity {
 
-    @TableId
+    @TableId(type = IdType.AUTO)
     private Long id;
 
     /** 内容ID(UGC表ID) */

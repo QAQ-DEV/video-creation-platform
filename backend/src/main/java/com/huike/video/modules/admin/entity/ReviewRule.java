@@ -1,5 +1,6 @@
 package com.huike.video.modules.admin.entity;
 
+import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableLogic;
 import com.baomidou.mybatisplus.annotation.TableName;
@@ -15,7 +16,7 @@ import lombok.EqualsAndHashCode;
 @TableName("review_rules")
 public class ReviewRule extends BaseEntity {
 
-    @TableId
+    @TableId(type = IdType.AUTO)
     private Long id;
 
     /** 规则名称 */
